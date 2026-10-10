@@ -20,7 +20,9 @@ npx skills add growing7696-cmyk/bluerskill
 npx skills add growing7696-cmyk/bluerskill -g
 ```
 
-필요한 것: [Claude Code](https://claude.com/claude-code), Blender 4.2 이상(5.x 권장)이 `PATH`에 있을 것. [blender-mcp](https://github.com/ahujasid/blender-mcp)가 연결돼 있으면 열려 있는 Blender에서 실시간으로 작업합니다.
+필요한 것: [Node.js](https://nodejs.org), [Git](https://git-scm.com), [Claude Code](https://claude.com/claude-code), Blender 4.2 이상(5.x 권장)이 `PATH`에 있을 것.
+
+> `Error: spawn git ENOENT`가 나오면 Git이 없는 것입니다. Windows는 `winget install --id Git.Git -e`로 설치한 뒤 터미널을 새로 열고 다시 실행하세요. [blender-mcp](https://github.com/ahujasid/blender-mcp)가 연결돼 있으면 열려 있는 Blender에서 실시간으로 작업합니다.
 
 ## 무엇을 하나
 
