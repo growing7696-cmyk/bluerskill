@@ -70,7 +70,11 @@ def _desaturate(rgba, amount):
 
 
 def world_bbox(obj):
-    pts = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    """World-space bbox. For an Empty that parents an assembly, covers all child meshes."""
+    objs = [obj]
+    if obj.type == "EMPTY":
+        objs = [o for o in obj.children_recursive if o.type == "MESH"] or [obj]
+    pts = [o.matrix_world @ Vector(c) for o in objs for c in o.bound_box]
     mn = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
     mx = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
     return mn, mx
@@ -218,7 +222,7 @@ def make_surface(width=1.2, depth=0.8, thickness=0.03, preset="light_wood",
     assign(slab, mat)
     add_breakup(mat, size=max(width, depth), amount=0.08)
     if "wood" in preset:
-        add_grain(mat, along="X")
+        add_grain(mat, spacing=max(0.0025, width * 0.004), along="X")  # wider grain on big boards
     return slab
 
 
@@ -379,7 +383,7 @@ def add_breakup(mat, size=0.2, amount=0.1, rough_spread=None, seed=1):
     return mat
 
 
-def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2):
+def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2, late_wood=(0.45, 0.33, 0.25)):
     """Wood grain: distorted wave bands darkening base color, slightly rougher in late wood."""
     nt = mat.node_tree
     p = principled(mat)
@@ -393,7 +397,28 @@ def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2):
     mp.inputs["Scale"].default_value = (stretch, 1, 1) if along == "X" else (1, stretch, 1)
     mp.inputs["Location"].default_value = (0.0, 0.08 + 0.03 * seed, 0.05) if along == "X" else (0.08 + 0.03 * seed, 0.0, 0.05)
     mp.inputs["Rotation"].default_value = (math.radians(0.7), math.radians(1.3), 0)
-    nt.links.new(tc.outputs["Object"], mp.inputs["Vector"])
+    # domain warp: wobble the coordinates so rings meander instead of running parallel
+    warp = nt.nodes.new("ShaderNodeTexNoise")
+    warp.location = (-1500, -1000)
+    warp.inputs["Scale"].default_value = 1.0 / (spacing * 60)
+    warp.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], warp.inputs["Vector"])
+    centered = nt.nodes.new("ShaderNodeVectorMath")
+    centered.operation = "SUBTRACT"
+    centered.location = (-1300, -1000)
+    centered.inputs[1].default_value = (0.5, 0.5, 0.5)
+    nt.links.new(warp.outputs["Color"], centered.inputs[0])
+    scaled = nt.nodes.new("ShaderNodeVectorMath")
+    scaled.operation = "SCALE"
+    scaled.location = (-1150, -1000)
+    scaled.inputs["Scale"].default_value = spacing * 8
+    nt.links.new(centered.outputs[0], scaled.inputs[0])
+    warped = nt.nodes.new("ShaderNodeVectorMath")
+    warped.operation = "ADD"
+    warped.location = (-1000, -900)
+    nt.links.new(tc.outputs["Object"], warped.inputs[0])
+    nt.links.new(scaled.outputs[0], warped.inputs[1])
+    nt.links.new(warped.outputs[0], mp.inputs["Vector"])
     wv = nt.nodes.new("ShaderNodeTexWave")
     wv.location = (-1100, -800)
     wv.wave_type = "RINGS"
@@ -415,7 +440,7 @@ def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2):
         nt.links.new(src, _sock(mix.inputs, "A_Color"))
     else:
         _sock(mix.inputs, "A_Color").default_value = base_in.default_value[:]
-    _sock(mix.inputs, "B_Color").default_value = (0.45, 0.33, 0.25, 1)
+    _sock(mix.inputs, "B_Color").default_value = (*late_wood, 1)
     nt.links.new(_sock(mix.outputs, "Result_Color"), base_in)
     rsrc = _source(nt, rough_in)
     ma = nt.nodes.new("ShaderNodeMath")
@@ -433,7 +458,12 @@ def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2):
 
 
 def add_wear(mat, strength=0.3, size=0.2, grime=(0.05, 0.04, 0.03), edge_tint=None, seed=5):
-    """AO-driven cavity grime + noise-masked convex edge wear (M7). strength ≈ WEAR/10."""
+    """AO-driven cavity grime + noise-masked convex edge wear (M7). strength ≈ WEAR/10.
+
+    size = the feature size the wear should respect, NOT the object length. On thin convex parts
+    (tubes, rods, scopes, cables) use ~ their radius/2, or the whole surface reads as "edge" and
+    gets tinted. Check the beauty render: if a dark part looks gray, this is usually why.
+    """
     nt = mat.node_tree
     p = principled(mat)
     base_in, rough_in = p.inputs["Base Color"], p.inputs["Roughness"]
@@ -560,12 +590,12 @@ def light_rig(kind="window", target=None, clear=True, intensity=1.0):
     made = []
     if kind == "window":
         d = s * 3.0
-        made.append(_area("Window", s * 1.6, 90 * d * d * intensity, 5600, _sph(c, d, 160, 28), c, size_y=s * 2.4))
-        made.append(_area("Bounce", s * 2.0, 12 * d * d * intensity, 4200, _sph(c, d, -20, 10), c))
+        made.append(_area("Window", s * 1.6, 26 * d * d * intensity, 5600, _sph(c, d, 160, 28), c, size_y=s * 2.4))
+        made.append(_area("Bounce", s * 2.0, 4 * d * d * intensity, 4200, _sph(c, d, -20, 10), c))
         world(strength=0.25 * intensity, temperature=9000)
     elif kind == "overcast":
         d = s * 3.5
-        made.append(_area("Sky", s * 5, 50 * d * d * intensity, 7000, c + Vector((0, 0, d)), c))
+        made.append(_area("Sky", s * 5, 30 * d * d * intensity, 7000, c + Vector((0, 0, d)), c))
         world(strength=0.6 * intensity, temperature=8000)
     elif kind == "golden_hour":
         data = bpy.data.lights.new("Sun", "SUN")
@@ -583,9 +613,9 @@ def light_rig(kind="window", target=None, clear=True, intensity=1.0):
         world(strength=0.5 * intensity, temperature=10000)
     elif kind == "studio":
         d = s * 3.0
-        made.append(_area("Key", s * 1.4, 70 * d * d * intensity, 5000, _sph(c, d, -130, 35), c))
-        made.append(_area("Fill", s * 2.5, 15 * d * d * intensity, 5600, _sph(c, d, -20, 15), c))
-        made.append(_area("Rim", s * 0.8, 60 * d * d * intensity, 6800, _sph(c, d, 100, 40), c, size_y=s * 2))
+        made.append(_area("Key", s * 1.4, 45 * d * d * intensity, 5000, _sph(c, d, -130, 35), c))
+        made.append(_area("Fill", s * 2.5, 9 * d * d * intensity, 5600, _sph(c, d, -20, 15), c))
+        made.append(_area("Rim", s * 0.8, 40 * d * d * intensity, 6800, _sph(c, d, 100, 40), c, size_y=s * 2))
         world(strength=0.08 * intensity, temperature=6500)
     elif kind == "night_practical":
         data = bpy.data.lights.new("Practical", "POINT")

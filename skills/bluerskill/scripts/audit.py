@@ -109,6 +109,24 @@ def run(as_json=False):
         add("G5", "H", "faceted curved surfaces (flat shading on curvature)", faceted,
             "hz.shade_smooth(obj) + more segments / hz.subdivide(obj)")
 
+    # Primitive assembly: unmodified cubes / cylinders / spheres / cones / tori placed together
+    shaping = {"BEVEL", "SUBSURF", "BOOLEAN", "SOLIDIFY", "DISPLACE", "SCREW", "NODES"}
+    prim_counts = {8, 42, 162, 482, 642, 33, 576, 507}
+
+    def is_primitive(o):
+        me = o.data
+        v, f = len(me.vertices), len(me.polygons)
+        if v <= 4 or any(m.type in shaping for m in o.modifiers):
+            return False
+        cylinder = v % 2 == 0 and f == v // 2 + 2 and v >= 12
+        return v in prim_counts or cylinder
+    prims = [o.name for o in meshes if is_primitive(o)]
+    shaped = [o for o in meshes if len(o.data.vertices) > 4]
+    if len(prims) >= 3 and len(prims) >= 0.4 * max(len(shaped), 1):
+        add("G12", "H", f"primitive assembly: {len(prims)} unmodified primitive(s) placed together", prims,
+            "rebuild parts with shapes.py builders (profile_extrude / lathe / sweep / rounded_box); "
+            "see reference/modeling.md")
+
     # Floating (bbox heuristic)
     if len(meshes) >= 2:
         floor = min(_bbox(o)[0].z for o in meshes)

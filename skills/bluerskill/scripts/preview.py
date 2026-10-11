@@ -1,8 +1,9 @@
 """bluerskill preview — render check images you then LOOK at (Read tool).
 
-    blender -b scene.blend --python preview.py -- --out ./renders [--views clay,beauty,wire]
+    blender -b scene.blend --python preview.py -- --out ./renders [--views silhouette,clay,beauty,wire]
                                                   [--res 900] [--samples 48] [--engine CYCLES|EEVEE]
 
+silhouette : flat black on white — judges the shape alone. If it doesn't read here, no material will save it.
 clay   : neutral material override — judges silhouette, shape rhythm, bevel highlights, contact.
 beauty : final materials and lights at preview quality.
 wire   : wireframe override — judges topology density and faceting.
@@ -63,6 +64,45 @@ def _wire():
     return m
 
 
+def _black():
+    m = bpy.data.materials.get("bz_black") or bpy.data.materials.new("bz_black")
+    if not m.node_tree:
+        m.use_nodes = True
+    nt = m.node_tree
+    for n in list(nt.nodes):
+        if n.bl_idname != "ShaderNodeOutputMaterial":
+            nt.nodes.remove(n)
+    out = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputMaterial")
+    em = nt.nodes.new("ShaderNodeEmission")
+    em.inputs["Color"].default_value = (0, 0, 0, 1)
+    nt.links.new(em.outputs[0], out.inputs["Surface"])
+    return m
+
+
+def _white_world():
+    w = bpy.data.worlds.get("bz_white") or bpy.data.worlds.new("bz_white")
+    if not w.node_tree:
+        w.use_nodes = True
+    bg = next(n for n in w.node_tree.nodes if n.bl_idname == "ShaderNodeBackground")
+    bg.inputs["Color"].default_value = (1, 1, 1, 1)
+    bg.inputs["Strength"].default_value = 1.0
+    return w
+
+
+def _support_surfaces(sc):
+    """Floors, tables, walls, mats: big flat meshes. Hidden in the silhouette pass so the subject shows."""
+    meshes = [o for o in sc.objects if o.type == "MESH" and not o.hide_render]
+    if len(meshes) < 2:
+        return []
+    def flat(o):
+        d = sorted(o.dimensions)
+        return d[0] < 0.08 * d[2] and d[1] >= 0.25 * d[2]
+    biggest = max(max(o.dimensions) for o in meshes)
+    subject = max((max(o.dimensions) for o in meshes if not flat(o)), default=0)
+    # big flat slabs, or flat slabs larger than any single subject part (mats, coasters, tabletops)
+    return [o for o in meshes if flat(o) and (max(o.dimensions) >= 0.6 * biggest or max(o.dimensions) > subject)]
+
+
 def _thumb(path):
     img = bpy.data.images.load(path)
     w, h = img.size
@@ -95,11 +135,25 @@ def run(out="./renders", views=("clay", "beauty"), res=900, samples=48, engine="
         sc.eevee.taa_render_samples = samples
     written = []
     vl = sc.view_layers[0]
+    world, vt, look = sc.world, sc.view_settings.view_transform, sc.view_settings.look
+    supports = _support_surfaces(sc)
     for v in views:
-        vl.material_override = {"clay": _clay, "wire": _wire}.get(v, lambda: None)()
+        vl.material_override = {"clay": _clay, "wire": _wire, "silhouette": _black}.get(v, lambda: None)()
+        if v == "silhouette":
+            sc.world, sc.view_settings.view_transform = _white_world(), "Standard"
+            for o in supports:
+                o.hide_render = True
         path = os.path.join(out, f"{v}.png")
         r.filepath = path
         bpy.ops.render.render(write_still=True)
+        if v == "silhouette":
+            for o in supports:
+                o.hide_render = False
+            sc.world, sc.view_settings.view_transform = world, vt
+            try:
+                sc.view_settings.look = look
+            except TypeError:
+                pass
         written += [path, _thumb(path)]
     r.engine, r.resolution_x, r.resolution_y, r.resolution_percentage, r.filepath, vl.material_override = saved
     print("BLUERSKILL_PREVIEW " + " ".join(written))

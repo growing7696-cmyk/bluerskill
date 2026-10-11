@@ -17,6 +17,8 @@ Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Sev
 | G9 M | Grid placement | Everything axis-aligned on round coordinates. | Rotate a few degrees, offset, cluster, let objects touch and lean. |
 | G10 L | Zero-thickness surfaces | Walls/leaves/paper with no edge read as cardboard. | Solidify; even paper gets 0.1 mm. |
 | G11 M | Uniform detail density | Every area equally detailed = nothing is the focus. | Concentrate detail at the focal point; simplify periphery. |
+| G12 H | Primitive assembly | Object = unmodified cubes/cylinders/spheres placed together; reads as a toy. | Rebuild with `shapes.py` builders matched to manufacture (`reference/modeling.md`). |
+| G13 M | Plank cutout | Extruded parts with flat sides and tiny edge radius. | `crown` + larger `edge_round` on `profile_extrude`. |
 
 ## Materials
 
