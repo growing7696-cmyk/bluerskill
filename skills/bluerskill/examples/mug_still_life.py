@@ -96,6 +96,7 @@ def bluerskill():
     cork = hz.physical_material("terracotta", color="#8f6440", name="Cork", roughness=0.9)
     hz.assign(coaster, cork)
     hz.add_breakup(cork, size=0.01, amount=0.18)
+    hz.add_bump(cork, feature=0.0008, kind="leather", strength=0.6)   # granulated cork
     hz.ground(coaster)
 
     body, handle, coffee = build_mug()
@@ -106,10 +107,12 @@ def bluerskill():
         hz.assign(o, glaze)
     hz.add_breakup(glaze, size=0.1, amount=0.06)
     hz.add_wear(glaze, strength=0.4, size=0.1)
+    hz.add_bump(glaze, feature=0.005, kind="orange_peel")            # dipped glaze ripple
     brew = hz.physical_material("plastic", color="#2a170c", name="Coffee", roughness=0.04)
     hz.assign(coffee, brew)
     hz.bevel(coffee, width=0.0008, segments=2)          # meniscus, not a razor disc
     hz.add_breakup(brew, size=0.05, amount=0.0, rough_spread=0.03)  # faint surface film
+    hz.add_bump(brew, feature=0.012, kind="noise", depth=0.00005)    # barely-there ripple
     bpy.context.view_layer.update()
     hz.ground(body, others=[coaster])
 
@@ -125,6 +128,7 @@ def bluerskill():
     cubes[2].rotation_euler.x += math.radians(90)  # one tipped over
     sugar = hz.physical_material("paper", color="#efeae0", name="Sugar", roughness=0.8)
     hz.add_breakup(sugar, size=0.013, amount=0.05)
+    hz.add_bump(sugar, feature=0.0006, kind="hammered", depth=0.0002)  # pressed crystals
     for c in cubes:
         hz.assign(c, sugar)
     bpy.context.view_layer.update()

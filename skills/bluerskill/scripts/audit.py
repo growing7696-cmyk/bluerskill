@@ -155,6 +155,8 @@ def run(as_json=False):
     # Clone army / grid placement
     groups = {}
     for o in meshes:
+        if o.parent:   # parts of a modeled assembly (rivets, screws) are identical on purpose
+            continue
         key = (o.data.name if o.data.users > 1 else None) or tuple(round(d, 3) for d in o.dimensions)
         groups.setdefault(key, []).append(o)
     clones = []
@@ -227,6 +229,35 @@ def run(as_json=False):
     if len(mats_seen) >= 2 and len(rough_consts) == len(mats_seen) and max(rough_consts) <= 0.25:
         add("M6", "M", "everything glossy: all roughness ≤ 0.25", list(mats_seen), "vary roughness families")
 
+    # Surface relief: nothing real is mathematically smooth (bump / normal map / displacement)
+    def has_relief(m):
+        p = _principled(m)
+        if p is None:
+            return True
+        out = next((n for n in m.node_tree.nodes if n.bl_idname == "ShaderNodeOutputMaterial"), None)
+        disp = out is not None and out.inputs["Displacement"].is_linked
+        tw = p.inputs.get("Transmission Weight")
+        glass = tw is not None and not tw.is_linked and tw.default_value > 0.5
+        return glass or disp or p.inputs["Normal"].is_linked
+    smooth = [n for n, (m, _) in mats_seen.items() if not has_relief(m)]
+    if smooth:
+        opaque = [n for n, (m, _) in mats_seen.items() if _principled(m) and not (
+            _principled(m).inputs.get("Transmission Weight") is not None
+            and _principled(m).inputs["Transmission Weight"].default_value > 0.5)]
+        every = len(smooth) == len(opaque)
+        add("M10", "H" if every else "M" if len(smooth) >= 0.5 * len(mats_seen) else "L",
+            "no surface relief (perfectly smooth normals)" + (" on every material" if every else ""), smooth,
+            'hz.add_bump(mat, feature, kind="noise|orange_peel|pores|hammered|leather"), '
+            "hz.add_weave (fabric), hz.add_scratches (gloss/metal)")
+
+    # Procedural noise left at Blender's default scale reads as "procedural"
+    default_noise = [n for n, (m, _) in mats_seen.items() if m.node_tree and any(
+        nd.bl_idname == "ShaderNodeTexNoise" and not nd.inputs["Vector"].is_linked
+        and abs(nd.inputs["Scale"].default_value - 5.0) < 1e-3 for nd in m.node_tree.nodes)]
+    if default_noise:
+        add("M8", "L", "noise texture at default scale 5 on generated coords", default_noise,
+            "scale noise from real feature size (1 / meters); layer two scales")
+
     # ---------------- Lighting ----------------
     w = sc.world
     bg = None
@@ -266,6 +297,28 @@ def run(as_json=False):
             add("L4", "M", "default world color (0.05 gray)", fix="hz.world(...) or an HDRI")
     elif not w:
         add("L4", "M", "no world", fix="hz.world(...)")
+
+    # Reflective materials need something to reflect, or they read as black plastic
+    reflective = []
+    for name, (m, _) in mats_seen.items():
+        p = _principled(m)
+        if not p:
+            continue
+        me_in, ro_in = p.inputs["Metallic"], p.inputs["Roughness"]
+        metal = me_in.is_linked or me_in.default_value > 0.5
+        coat = p.inputs.get("Coat Weight")
+        glossy = (not ro_in.is_linked and ro_in.default_value < 0.25) or (
+            coat is not None and not coat.is_linked and coat.default_value > 0.3)
+        if metal or glossy:
+            reflective.append(name)
+    env_textured = bool(w and w.node_tree and any(
+        n.bl_idname in {"ShaderNodeTexEnvironment", "ShaderNodeTexSky"} for n in w.node_tree.nodes))
+    big_area = [l for l in lights if l.data.type == "AREA" and max(l.data.size, getattr(l.data, "size_y", 0)) > 0.4]
+    if reflective and not env_textured:
+        metals = [n for n in reflective if _principled(mats_seen[n][0]).inputs["Metallic"].default_value > 0.5]
+        add("L7", "H" if metals and not big_area else "M",
+            "metal/gloss with nothing to reflect (flat-color world)", reflective,
+            'hz.hdri_world("interior"|"studio"|...) or hz.light_rig(..., env="auto")')
 
     # ---------------- Camera ----------------
     cam = sc.camera

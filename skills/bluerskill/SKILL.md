@@ -1,6 +1,6 @@
 ---
 name: bluerskill
-description: Anti-slop 3D for Blender. Use whenever building, editing, lighting, texturing, or rendering a Blender scene (bpy scripts, blender-mcp, .blend files, product shots, props, environments, stylized scenes) so the result looks authored by a 3D artist instead of AI/procedural-default. Triggers on Blender, bpy, 3D modeling, 3D render, lookdev, "make it look less CG / less fake / less AI". Covers modeling (silhouette, reference dimensions, lathe/extrude/sweep construction) as well as materials, lighting and camera. Not for game-engine shader code, CAD tolerancing, or 2D image generation.
+description: Anti-slop 3D for Blender. Use whenever building, editing, lighting, texturing, or rendering a Blender scene (bpy scripts, blender-mcp, .blend files, product shots, props, environments, stylized scenes) so the result looks authored by a 3D artist instead of AI/procedural-default. Triggers on Blender, bpy, 3D modeling, 3D render, lookdev, "make it look less CG / less fake / less AI". Covers modeling (silhouette, reference dimensions, lathe/extrude/sweep/loft construction, cloth drape) as well as surface relief, materials, reflections, lighting, camera and pixel-level render checks. Not for game-engine shader code, CAD tolerancing, or 2D image generation.
 metadata:
   short-description: Make Blender output look hand-made, not AI-generated.
 ---
@@ -21,12 +21,14 @@ Files in this skill (paths relative to this SKILL.md):
 | `reference/ai-tells.md` | Full catalog of 3D AI tells, with the fix for each. Read before starting any non-trivial scene. |
 | `reference/materials.md` | Physically plausible albedo/roughness table and breakup recipes. |
 | `reference/light-camera.md` | Lighting rigs, color temperature, lens and composition rules. |
-| `scripts/shapes.py` | Modeling builders: `profile_extrude` (with `crown`), `lathe`, `sweep`, `rounded_box`, `cut`/`union`, `screw`, `group`, `check_dims`. |
-| `scripts/humanize.py` | Finishing library: bevel, ground, jitter, physical materials, breakup, wear, wood grain, light rigs, camera, color management. |
-| `scripts/audit.py` | Scores a scene 0–100 for AI tells and prints fixes. Run it, don't eyeball it. |
-| `scripts/preview.py` | Renders silhouette / clay / beauty / wire check images so you can *look* at the result. |
+| `scripts/shapes.py` | Modeling builders: `profile_extrude` (with `crown`), `lathe`, `sweep`, `loft` (organic sections), `drape` (cloth sim), `rounded_box`, `cut`/`union`, `screw`, `group`, `check_dims`. |
+| `scripts/humanize.py` | Finishing library: bevel, ground, jitter, physical materials, breakup, wear, wood grain, **surface relief** (`add_bump`, `add_scratches`, `add_weave`), planked surfaces, **HDRI reflections** (`hdri_world`), light rigs, camera, color management. |
+| `scripts/audit.py` | Scores the *scene* 0–100 for AI tells and prints fixes. Run it, don't eyeball it. |
+| `scripts/look.py` | Scores the *rendered pixels* 0–100: clipping, milky/washed-out values, subject separation, highlights, framing. `preview.py` runs it after every beauty render. |
+| `scripts/preview.py` | Renders silhouette / clay / beauty / wire check images so you can *look* at the result, then runs `look.py`. |
 | `examples/mug_still_life.py` | Simple scene: same brief built the AI-default way (`--slop`, audit 0) and the bluerskill way (audit 100). |
 | `examples/rifle_prop.py` | **Hard-surface hero prop** (~35 parts) built from a reference sheet with every builder. Copy its structure for any prop. |
+| `examples/knife_board.py` | **Organic + soft forms**: lofted handle, ground blade, draped linen towel, glued board, scratches, HDRI reflections. Copy it for anything held, grown or made of cloth. |
 
 ---
 
@@ -39,7 +41,7 @@ Prefer, in order:
    ```bash
    blender -b scene.blend --python build.py            # build / modify
    blender -b scene.blend --python <skill>/scripts/audit.py            # score
-   blender -b scene.blend --python <skill>/scripts/preview.py -- --out ./renders   # look
+   blender -b scene.blend --python <skill>/scripts/preview.py -- --out ./renders   # look (+ look.py report)
    ```
    In `build.py`, put `sys.path.insert(0, "<skill>/scripts")` then `import shapes as sh, humanize as hz`. Save with `bpy.ops.wm.save_as_mainfile(filepath=...)`.
 
@@ -77,8 +79,10 @@ Baselines: product shot `2/1/1` · stylized prop `3/5/2` · interior archviz `3/
 6. **No startup camera, no startup light.** Delete or move them. Never ship 50 mm from (7.36, -6.93, 4.96).
 7. **AgX (or Filmic), never Standard.** Standard clips highlights into flat CG white.
 8. **No clone armies.** Repeated objects get per-instance variation in rotation, scale, and ideally material (`hz.jitter`).
-9. **Verify by looking.** Run `audit.py` (target ≥ 85) and `preview.py`, then open the PNGs with the Read tool before claiming done. Don't report a score you didn't run.
+9. **Verify by looking.** Run `audit.py` (scene, target ≥ 85) and `preview.py` (renders + `look.py` pixel report, target ≥ 85), then open the PNGs with the Read tool before claiming done. Don't report a score you didn't run. A scene can score 100 and still render milky and flat — that's what `look.py` is for.
 10. **No primitive assembly.** Don't build an object by placing unmodified cubes/cylinders/spheres. Every part is made with the `shapes.py` builder that matches how the real part is manufactured (§4).
+11. **No mathematically smooth surfaces.** Every opaque material gets relief from its real process: `hz.add_bump` (pores, orange peel, cast, hammered, leather), `hz.add_weave` (any fabric), `hz.add_scratches` (handled metal, gloss, lacquer). Liquids and glass may stay smooth.
+12. **Metal and gloss need something to reflect.** A flat-color world turns steel into gray plastic. Use `hz.light_rig(..., env="auto")` (default) or `hz.hdri_world(...)` — Blender ships HDRIs, no download needed.
 
 ## 3. Default bans (override only when the user asks)
 
@@ -97,7 +101,7 @@ These are the 3D equivalent of purple gradients and glassmorphism — instant "A
 
 1. **Reference sheet** in the script docstring: real dimensions in meters, origin and axis named. Look up or reason from human scale. Verify with `sh.check_dims`.
 2. **Silhouette**: find the one view that identifies the object; draw that outline as 2D points with per-corner radii. Render `--views silhouette` — if it doesn't read in flat black, fix the outline before anything else.
-3. **Construction = manufacturing**: sawn → `profile_extrude` (+ `crown` on anything a hand touches), turned → `lathe` (put chamfers, lips, grooves in the profile), bent rod → `sweep`, machined block → `rounded_box`, drilled → `cut`, fasteners → `screw`.
+3. **Construction = manufacturing**: sawn → `profile_extrude` (+ `crown` on anything a hand touches), turned → `lathe` (put chamfers, lips, grooves in the profile), bent rod → `sweep`, shaped by hand / grown → `loft` (section changes along a path: handles, grips, fruit, hulls), machined block → `rounded_box`, drilled → `cut`, fasteners → `screw`, cloth → `drape` (simulated onto what it lies on — never a flat plane with a fabric texture).
 4. **Primary → secondary → tertiary**: 2–4 masses for the silhouette, then functional parts, then sparse small detail (screws, seams, spacers) concentrated where the camera looks.
 5. **Joins**: parts sink into each other per the sheet; add a cap, spacer or seam where real objects have one. Group with `sh.group` and move the assembly as one.
 6. **Clay check**: surfaces should show curvature and soft highlight roll-off, not flat planes. Check it reads the right way up from the camera.
@@ -106,6 +110,9 @@ These are the 3D equivalent of purple gradients and glassmorphism — instant "A
 stock = sh.profile_extrude("Stock", outline_pts, 0.042, radii=corner_radii, edge_round=0.011, crown=0.0045)
 barrel = sh.lathe("Barrel", [(0, 0), (0.0145, 0), (0.0112, 0.2), (0.0085, 0.555), (0, 0.555)], axis="X")
 guard = sh.sweep("Trigger_guard", [(0.40, 0, -0.05), (0.375, 0, -0.084), (0.326, 0, -0.05)], 0.0032)
+handle = sh.loft("Handle", [((-0.01, 0, 0.032), 0.015, 0.030, 0.65), ((-0.07, 0, 0.031), 0.020, 0.026, 0.5),
+                            ((-0.124, 0, 0.0345), 0.017, 0.025, 0.62)], end_round=(0.0, 0.5))
+towel = sh.drape("Towel", (0.42, 0.30), location=(0.2, -0.13, 0.075), colliders=[board, counter], crumple=0.15)
 ```
 
 ## 5. Workflow
@@ -114,12 +121,12 @@ guard = sh.sweep("Trigger_guard", [(0.40, 0, -0.05), (0.375, 0, -0.084), (0.326,
 2. **Units & scale**: metric, scale 1.0. Block out at real dimensions.
 3. **Model** per §4: reference sheet → silhouette → builders → detail tiers → clay check. Break perfect symmetry on anything used or handmade.
 4. **Edges**: builders round edges by default; anything else gets `hz.bevel`. Shade smooth + harden normals.
-5. **Materials**: start from `hz.physical_material(preset)`, then `hz.add_breakup` and, for WEAR ≥ 3, `hz.add_wear` (pass `size` ≈ the feature size; on thin tubes use ~radius/2). Wood gets `hz.add_grain`. Colors come from reference, desaturated a notch from what feels right.
+5. **Materials**: start from `hz.physical_material(preset)`, then `hz.add_breakup` and, for WEAR ≥ 3, `hz.add_wear` (pass `size` ≈ the feature size; on thin tubes use ~radius/2). Wood gets `hz.add_grain`. Then **relief** (rule 11): `add_bump` with the kind that matches the process, `add_weave` for fabric (`uv=True` on draped cloth), `add_scratches` where hands and tools touch. Big wooden surfaces get `make_surface(..., planks=0.1–0.2)` (or `glued=True` for butcher block). Colors come from reference, desaturated a notch from what feels right.
 6. **Placement**: `hz.ground`, `hz.jitter`; nothing on round coordinates; objects relate to each other (touching, leaning, overlapping in depth).
-7. **Light**: motivated sources only (window, lamp, sun, practical). Warm/cool contrast via color temperature. `hz.light_rig("window" | "overcast" | "golden_hour" | "studio" | "night_practical")`.
+7. **Light**: motivated sources only (window, lamp, sun, practical). Warm/cool contrast via color temperature. `hz.light_rig("window" | "overcast" | "golden_hour" | "studio" | "night_practical", key_azimuth=...)` — put the key 60–130° from the camera azimuth; for flat polished things (blades, screens, tabletops) near the mirror angle (camera azimuth + 180°) so they catch one soft highlight. Each rig adds a matching bundled HDRI for reflections.
 8. **Camera**: chosen lens (35 mm environment, 50–85 mm product, 100 mm macro), eye height that a person would actually stand at, rule-of-thirds subject, foreground element when CLUTTER ≥ 3. `hz.camera_rig`.
 9. **Color & render**: `hz.color_management`, `hz.render_settings`.
-10. **Audit → preview → look → fix**, loop until audit ≥ 85 and the renders hold up at thumbnail size.
+10. **Audit → preview → look → fix**, loop until audit ≥ 85, `look.py` ≥ 85 and the renders hold up at thumbnail size. Fix `look.py` findings with light and exposure, not by editing the thresholds.
 
 Read `reference/modeling.md` before modeling, `reference/ai-tells.md` for the full tell → fix catalog and `reference/materials.md` / `reference/light-camera.md` when doing that stage.
 
@@ -128,10 +135,12 @@ Read `reference/modeling.md` before modeling, `reference/ai-tells.md` for the fu
 - [ ] Header posted; references are concrete; reference sheet with dimensions in the script.
 - [ ] Silhouette render recognizable at thumbnail size; no part built from an unmodified primitive.
 - [ ] `audit.py` run; score ≥ 85; every remaining FAIL justified in one line.
+- [ ] `look.py` (via `preview.py`) run on the beauty render; score ≥ 85; no clipping, not milky, subject separates from what's behind it.
+- [ ] Every opaque material has relief; every metal/gloss has an environment to reflect.
 - [ ] Clay render: silhouette reads; shapes have size rhythm; no faceting.
 - [ ] Beauty render viewed with Read: edges catch highlights; contact shadows exist; no clipped whites.
 - [ ] At least one sign of history (wear, use, dust, asymmetry) proportional to WEAR.
 - [ ] Nothing in §3 present unless the user asked for it.
 - [ ] Dark materials actually look dark (if not: lower exposure / light intensity — AgX compresses range).
 
-Report: final audit score, render paths, and any deliberate deviations.
+Report: final audit score, look score, render paths, and any deliberate deviations.

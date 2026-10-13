@@ -44,24 +44,31 @@ def materials():
     hz.add_grain(walnut, spacing=0.004, along="X", contrast=0.65, late_wood=(0.32, 0.2, 0.13))
     hz.add_breakup(walnut, size=0.4, amount=0.05)
     hz.add_wear(walnut, strength=0.25, size=0.15, edge_tint=hz.srgb("#8a6040"))
+    hz.add_bump(walnut, feature=0.0007, kind="pores", along="X")       # open pores under the oil finish
 
     blued = hz.physical_material("steel", color="#30343b", name="Blued_steel", roughness=0.3)
     hz.add_breakup(blued, size=0.3, amount=0.05)
     hz.add_wear(blued, strength=0.3, size=0.05, grime=(0.03, 0.025, 0.02), edge_tint=(0.55, 0.56, 0.57, 1))
+    hz.add_scratches(blued, size=0.12, density=0.4, strength=0.35)       # holster/handling marks
+    hz.add_bump(blued, feature=0.0015, kind="noise", strength=0.3)
 
     anod = hz.physical_material("plastic", color="#141516", name="Anodized_black", roughness=0.32)
     hz.principled(anod).inputs["Specular IOR Level"].default_value = 0.15
     hz.add_breakup(anod, size=0.2, amount=0.03)
     # thin convex tube: keep the wear size small or the whole surface counts as "edge" and turns gray
     hz.add_wear(anod, strength=0.15, size=0.006, edge_tint=hz.srgb("#3a3b3d"))
+    hz.add_bump(anod, feature=0.0006, kind="noise", strength=0.25)      # bead-blasted before anodizing
 
     ebony = hz.physical_material("dark_wood", color="#140e0b", name="Ebony", roughness=0.38)
     hz.principled(ebony).inputs["Coat Weight"].default_value = 0.0
     hz.add_breakup(ebony, size=0.05, amount=0.08)
+    hz.add_bump(ebony, feature=0.0005, kind="pores", along="X", strength=0.5)
     spacer = hz.physical_material("plastic", color="#e6e1d6", name="Spacer_white", roughness=0.35)
     hz.add_breakup(spacer, size=0.05, amount=0.04)
+    hz.add_bump(spacer, feature=0.003, kind="orange_peel")
     rubber = hz.physical_material("rubber", name="Butt_pad_rubber")
     hz.add_breakup(rubber, size=0.1, amount=0.05)
+    hz.add_bump(rubber, feature=0.0012, kind="leather")                 # stippled recoil pad
 
     lens = hz.physical_material("glass", name="Lens")
     hz.principled(lens).inputs["Thin Film Thickness"].default_value = 320  # coated-lens tint
@@ -69,8 +76,10 @@ def materials():
 
     brass = hz.physical_material("brass", name="Brass", roughness=0.22)
     hz.add_breakup(brass, size=0.05, amount=0.08)
+    hz.add_scratches(brass, size=0.04, density=0.6, strength=0.4)      # chambered once: extractor marks
     copper = hz.physical_material("copper", name="Copper_jacket", roughness=0.25)
     hz.add_breakup(copper, size=0.05, amount=0.06)
+    hz.add_bump(copper, feature=0.001, kind="noise", strength=0.3)
     return dict(ebony=ebony, spacer=spacer, walnut=walnut, blued=blued, anod=anod, rubber=rubber, lens=lens, brass=brass, copper=copper)
 
 
@@ -216,8 +225,8 @@ def cartridge(name, M, location, rot):
 def scene():
     hz.remove_startup()
     M = materials()
-    bench = hz.make_surface(2.6, 1.5, 0.05, "light_wood", color="#9a7a5c", name="Workbench", wear=5)
-    mat = hz.make_surface(1.3, 0.42, 0.006, "cotton", color="#5e5b44", name="Canvas_mat", wear=4,
+    bench = hz.make_surface(2.6, 1.5, 0.05, "light_wood", color="#7a5f48", name="Workbench", wear=5, planks=0.15)
+    mat = hz.make_surface(1.3, 0.42, 0.006, "canvas", color="#4f4d38", name="Canvas_mat", wear=4,
                           location=(0.04, -0.03), z_top=0.006)
     mat.rotation_euler.z = math.radians(-3)
 
@@ -238,10 +247,12 @@ def scene():
     hz.jitter([rounds[0], rounds[1]], rot_deg=(0, 0, 30), seed=4)
 
     # camera on the bolt-handle side: grip down, scope up — the rifle reads the right way up
-    hz.light_rig("window", target=rifle)
-    hz.camera_rig(rifle, lens=50, azimuth_deg=95, elevation_deg=62, fstop=5.6,
-                  frame_offset=(0.0, 0.0), fill=0.86)
-    hz.color_management("AgX - Medium High Contrast")
+    # key ~50° off the camera, from behind the stock: the barrel and scope catch the window as a
+    # highlight line, the stock's crown shades from light to dark across its width
+    hz.light_rig("window", target=rifle, key_azimuth=120, intensity=1.4)
+    hz.camera_rig(rifle, lens=85, azimuth_deg=70, elevation_deg=30, fstop=5.6,
+                  frame_offset=(0.0, 0.0), fill=1.05)
+    hz.color_management("AgX - High Contrast", exposure=0.2)   # look.py: R5 cleared, not washed out
     hz.render_settings(samples=160, resolution=(1800, 1000))
 
 

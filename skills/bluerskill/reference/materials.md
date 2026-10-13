@@ -27,7 +27,7 @@ Values are linear (what you type into Principled BSDF), not sRGB hex. When conve
 | Copper (metal) | (0.95, 0.64, 0.54) | 0.2–0.45 | Patina in cavities |
 | Brass (metal) | (0.91, 0.78, 0.42) | 0.2–0.45 | |
 
-Presets with these values ship in `hz.PRESETS`.
+Presets with these values ship in `hz.PRESETS`, plus `linen`, `canvas`, `felt`, `oiled_walnut`, `end_grain_maple`, `enamel_paint`, `blued_steel`, `stainless`, `cast_iron`.
 
 ## Breakup recipe (what `hz.add_breakup` builds)
 
@@ -44,6 +44,26 @@ Rules: two scales minimum (large blotches + fine grain). Roughness spread ±0.05
 - **Cavity grime**: AmbientOcclusion (distance ≈ 2–5 % of object size) → ramp → darken base color up to 25 %, raise roughness.
 - **Edge wear**: AmbientOcclusion `inside=True` (convexity) → ramp masked by noise → lighten / expose under-material, lower roughness on handled spots.
 - Strength scales with WEAR dial: `strength = WEAR / 10`.
+
+## Relief recipe (rule 11 — what `hz.add_bump` / `add_weave` / `add_scratches` build)
+
+Relief comes from the **process** that made the surface, at its **real feature size**. Pick the kind, give it meters:
+
+| Surface | Call | Feature |
+|---|---|---|
+| Open-grain wood (walnut, oak, ash) | `add_bump(m, 0.0005–0.001, kind="pores", along="X")` | pores stretched along the grain |
+| Sprayed paint, powder coat, glaze | `add_bump(m, 0.002–0.006, kind="orange_peel")` | tiny depth; a coat stays smooth over it |
+| Cast / molded / bead-blasted / matte | `add_bump(m, 0.0005–0.003, kind="noise", strength=0.2–0.5)` | |
+| Hand-forged, peened, hammered | `add_bump(m, 0.004–0.012, kind="hammered")` | also salt/sugar crystals at < 1 mm |
+| Pebbled leather, rubber stipple, cork | `add_bump(m, 0.001–0.003, kind="leather")` | |
+| Any woven fabric | `add_weave(m, thread=0.0003–0.003, uv=True on drape)` | linen 0.3–0.5 mm, canvas ~1 mm, towel 2 mm |
+| Handled metal, glossy plastic, lacquer, glass | `add_scratches(m, size=object size, density, strength)` | hairlines clustered where hands/tools touch; rougher, bare metal shows |
+
+Bumps chain: each call keeps the previous Normal input. `Coat Normal` is left alone on purpose — a clear coat stays smooth over the relief, which is exactly what makes varnish and glaze read as a layer.
+
+## Planked and glued surfaces
+
+`hz.make_surface(..., planks=0.15)` builds boards with hairline gaps, tiny steps and per-board tone/grain (a `bz_rand` face attribute, combined with Object Info Random). `glued=True` for butcher block and cutting boards: tone changes only, no gaps. A single 2 m slab of perfect grain is a tell.
 
 ## Stylized (STYLIZATION ≥ 5)
 

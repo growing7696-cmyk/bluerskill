@@ -6,6 +6,8 @@ real thing is manufactured, and you get a believable silhouette for free:
     profile_extrude  flat-silhouette parts: stocks, blades, brackets, tools, furniture panels
     lathe            turned / round parts: barrels, bottles, cups, knobs, lenses, cartridges
     sweep            tubes and bent rod: handles, trigger guards, cables, pipes, frames
+    loft             organic sections along a path: knife/tool handles, grips, fruit, hulls
+    drape            cloth simulated onto what it lies on: towels, rags, tablecloths
     rounded_box      machined blocks: receivers, housings, buttons, bases
     cut / union      boolean details: ports, slots, holes, grooves (always beveled afterwards)
     screw            tertiary detail that sells scale
@@ -53,8 +55,10 @@ def _smooth(me, angle_deg=35):
 
 
 def _active(obj):
+    bpy.context.view_layer.update()   # objects linked/removed via bpy.data leave stale entries otherwise
     for o in bpy.context.view_layer.objects:
-        o.select_set(False)
+        if o is not None:
+            o.select_set(False)
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
 
@@ -282,6 +286,175 @@ def sweep(name, points, radius, radii=None, resolution=10, cyclic=False, samples
     return obj
 
 
+def _superellipse(w, h, squareness, n):
+    """Closed cross-section: 0 = ellipse, 1 = nearly a rounded rectangle."""
+    e = 2.0 / (2.0 + 8.0 * max(0.0, min(squareness, 1.0)))
+    pts = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        c, s = math.cos(a), math.sin(a)
+        pts.append((w / 2 * math.copysign(abs(c) ** e, c), h / 2 * math.copysign(abs(s) ** e, s)))
+    return pts
+
+
+def loft(name, stations, ring=32, samples=6, up=(0, 0, 1), end_round=(0.6, 0.6), edge_round=None):
+    """Organic / sculpted forms: a cross-section that changes along a path.
+
+    stations: [(point_xyz, width, height, squareness), ...] — width is across the path (side to
+    side), height is along `up`. Positions and sizes are smoothed (Catmull-Rom) between stations.
+    Use for anything held or grown rather than machined: knife and tool handles, grips, bananas,
+    boat hulls, shoe lasts, bottle necks with non-round sections, horns, tentacles, gourds.
+    end_round: (start, end) dome depth as a fraction of the end section's half size (0 = flat cap).
+    edge_round: bevel on the rim of a flat cap (None = 12 % of that end's smaller section size).
+    """
+    pts = [Vector(s[0]) for s in stations]
+    dims = [(s[1], s[2], s[3] if len(s) > 3 else 0.0) for s in stations]
+    if len(pts) > 2:
+        path = [Vector(p) for p in smooth_path(pts, samples)]
+        sm = [Vector(p) for p in smooth_path([Vector(d) for d in dims], samples)]
+    else:
+        path, sm = pts, [Vector(d) for d in dims]
+    up = Vector(up).normalized()
+    frames = []
+    for i, p in enumerate(path):
+        t = (path[min(i + 1, len(path) - 1)] - path[max(i - 1, 0)]).normalized()
+        side = t.cross(up)
+        if side.length < 1e-6:  # path parallel to up: pick any perpendicular
+            side = t.orthogonal()
+        side.normalize()
+        frames.append((p, t, side, side.cross(t).normalized()))  # normal = side x tangent ≈ up
+
+    def section(i, scale=1.0, shift=0.0):
+        p, t, s, n = frames[i]
+        w, h, sq = sm[i]
+        c = p + t * shift
+        return [c + s * (u * scale) + n * (v * scale) for u, v in _superellipse(max(w, 1e-5), max(h, 1e-5), sq, ring)]
+
+    rings = []
+    caps = []
+    for end, idx, sign in ((0, 0, -1), (1, len(frames) - 1, 1)):
+        k = end_round[end]
+        if k > 0:
+            depth = k * min(sm[idx][0], sm[idx][1]) / 2
+            steps = 4
+            dome = []
+            for j in range(steps, 0, -1):   # from the tip inward
+                a = (j / steps) * (math.pi / 2)
+                dome.append(section(idx, scale=max(math.cos(a), 0.12), shift=sign * depth * math.sin(a)))
+            caps.append(dome if end == 0 else list(reversed(dome)))
+        else:
+            caps.append([])
+    rings = caps[0] + [section(i) for i in range(len(frames))] + caps[1]
+
+    bm = bmesh.new()
+    vr = [[bm.verts.new(c) for c in r] for r in rings]
+    for a, b in zip(vr, vr[1:]):
+        for j in range(ring):
+            bm.faces.new((a[j], a[(j + 1) % ring], b[(j + 1) % ring], b[j]))
+    for r, rev in ((vr[0], True), (vr[-1], False)):
+        c = bm.verts.new(sum((v.co for v in r), Vector()) / len(r))
+        for j in range(ring):
+            f = (r[j], r[(j + 1) % ring], c)
+            bm.faces.new(tuple(reversed(f)) if not rev else f)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    _smooth(me, 70)
+    obj = _link(name, me)
+    if edge_round is None:
+        flat = [i for i, k in ((0, end_round[0]), (-1, end_round[1])) if k <= 0]
+        edge_round = min((min(sm[i][0], sm[i][1]) * 0.12 for i in flat), default=0.0)
+    if edge_round > 0:
+        mod = obj.modifiers.new("bz_bevel", "BEVEL")
+        mod.width, mod.segments, mod.limit_method = edge_round, 3, "ANGLE"
+        mod.angle_limit = math.radians(50)
+        mod.use_clamp_overlap = True
+    return obj
+
+
+def drape(name, size, location, colliders=(), subdiv=(80, 80), frames=45, thickness=0.0015,
+          stiffness=5.0, mass=0.15, rotation_deg=0.0, friction=8.0, seed=0, crumple=0.0):
+    """Cloth that has actually fallen onto things (towels, rags, tablecloths, napkins, flags at rest).
+
+    size: (x, y) in meters. location: where the sheet starts (a little above what it lands on).
+    colliders: meshes it lands on (collision is added for the bake, then removed).
+    stiffness: bending; ~0.5 silk, 5 cotton/linen, 20 canvas/denim, 80 leather.
+    crumple: 0–1, random lift noise before the drop so it lands with folds instead of a perfect sheet.
+    The simulation is baked and applied: the result is a plain mesh with solidify + subsurf, and a
+    "UVMap" in meters of flat cloth — use hz.add_weave(mat, ..., uv=True) so threads follow the folds.
+    A folded or fallen cloth reads as real; a flat plane with a fabric texture never does.
+    """
+    import random as _r
+    rng = _r.Random(seed)
+    sc = bpy.context.scene
+    bm = bmesh.new()
+    uv = bm.loops.layers.uv.new("UVMap")
+    bmesh.ops.create_grid(bm, x_segments=subdiv[0], y_segments=subdiv[1], size=0.5)
+    for v in bm.verts:
+        v.co.x *= size[0]
+        v.co.y *= size[1]
+    for f in bm.faces:   # UVs in meters of flat cloth: weave and stripes follow the fabric through folds
+        for lp in f.loops:
+            lp[uv].uv = (lp.vert.co.x, lp.vert.co.y)
+    if crumple > 0:
+        # a few soft lumps, so the sheet buckles into folds like a dropped towel
+        bumps = [(Vector((rng.uniform(-0.5, 0.5) * size[0], rng.uniform(-0.5, 0.5) * size[1], 0)),
+                  rng.uniform(0.1, 0.3) * max(size), rng.uniform(-1, 1)) for _ in range(6)]
+        for v in bm.verts:
+            for c, r, h in bumps:
+                d = (v.co.xy - c.xy).length
+                if d < r:
+                    v.co.z += crumple * h * 0.15 * max(size) * (1 - d / r) ** 2
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    obj = _link(name, me, location)
+    obj.rotation_euler.z = math.radians(rotation_deg)
+    added = []
+    for c in colliders:
+        if not any(m.type == "COLLISION" for m in c.modifiers):
+            c.modifiers.new("bz_collision", "COLLISION")
+            added.append(c)
+        c.collision.thickness_outer = max(thickness * 0.8, 0.0008)
+        c.collision.cloth_friction = friction
+    cl = obj.modifiers.new("bz_cloth", "CLOTH")
+    s = cl.settings
+    s.quality = 8
+    s.mass = mass
+    s.tension_stiffness = s.compression_stiffness = 15
+    s.shear_stiffness = 5
+    s.bending_stiffness = stiffness
+    s.air_damping = 1.5
+    cl.collision_settings.use_self_collision = True
+    cl.collision_settings.self_distance_min = thickness
+    cl.collision_settings.distance_min = thickness * 0.8
+    cl.collision_settings.collision_quality = 4
+    cl.point_cache.frame_start, cl.point_cache.frame_end = 1, frames
+    f0, f1 = sc.frame_start, sc.frame_end
+    sc.frame_end = max(sc.frame_end, frames)
+    for f in range(1, frames + 1):
+        sc.frame_set(f)
+    dg = bpy.context.evaluated_depsgraph_get()
+    baked = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
+    old = obj.data
+    obj.modifiers.remove(cl)
+    obj.data = baked
+    bpy.data.meshes.remove(old)
+    baked.name = name
+    sc.frame_set(f0)
+    sc.frame_end = f1
+    for c in added:
+        for m in [m for m in c.modifiers if m.name == "bz_collision"]:
+            c.modifiers.remove(m)
+    _smooth(baked, 180)
+    so = obj.modifiers.new("bz_solid", "SOLIDIFY")
+    so.thickness, so.offset = thickness, 0
+    sd = obj.modifiers.new("bz_subd", "SUBSURF")
+    sd.levels, sd.render_levels = 1, 2
+    return obj
+
+
 def rounded_box(name, size, radius=None, location=(0, 0, 0), segments=4):
     """Machined block with real edge radius (default 12 % of the smallest side)."""
     sx, sy, sz = size
@@ -352,6 +525,7 @@ def screw(name, location, normal=(0, 0, 1), radius=0.003, slot=True):
 
 def group(objs, name, location=(0, 0, 0)):
     """Parent parts to an Empty so the whole assembly moves/rotates as one."""
+    bpy.context.view_layer.update()   # matrix_world is stale right after setting .location
     e = bpy.data.objects.new(name, None)
     bpy.context.scene.collection.objects.link(e)
     e.location = location

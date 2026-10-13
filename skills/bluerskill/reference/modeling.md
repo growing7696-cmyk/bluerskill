@@ -33,6 +33,8 @@ Most objects are recognized by **one** view. Find it (a rifle by its side profil
 | Sawn / cut from a sheet or blank | `profile_extrude` (+ `crown`) | gun stocks, knife blades, chair sides, brackets, signs, phone bodies |
 | Turned on a lathe / spun / molded round | `lathe` | barrels, bottles, cups, knobs, lenses, table legs, cartridges, lamp bases |
 | Bent rod, tube, wire, forged loop | `sweep` (with taper `radii`) | handles, trigger guards, frames, cables, pipes, hooks |
+| Shaped by hand, carved, grown, molded organic | `loft` (cross-section changes along a path: width, height, squareness per station) | knife/tool handles, grips, bananas, gourds, horns, boat hulls, shoe lasts, bottle necks with square sections |
+| Cloth, towels, rags, tablecloths, flags at rest | `drape` (cloth sim baked onto colliders, metric UVs) | anything fabric — never a flat plane with a fabric texture |
 | Machined block | `rounded_box` | receivers, housings, buttons, bases, mounts |
 | Drilled / milled feature | `cut` (boolean, beveled afterwards) | ports, slots, holes, grooves, vents |
 | Fasteners | `screw` | anywhere parts are held together — they prove the scale |
@@ -41,6 +43,7 @@ Rules:
 - **Profiles carry the detail.** A lathe profile with a chamfer, a lip, a groove and a recess beats a cylinder plus four extra objects.
 - **`crown` on every extruded part that a hand touches** (stocks, handles, grips, bodies). Flat sides = plywood cutout. 8–15 % of thickness.
 - **Edge radius scales with the part**: large rounds on hand-contact wood/plastic, tight radii on machined steel. Never zero.
+- **Ground / thinned parts**: blades, chisels, spatulas aren't constant thickness. Build the silhouette with `profile_extrude` (a tiny `crown` tessellates the flat sides), then scale vertex Y by distance from the edge — see `examples/knife_board.py`.
 - **Parts meet, they don't float.** Sink joins into each other (receiver into stock, handle ends into the wall). Use a contrasting cap, spacer or seam where real objects have one — joins are where craft shows.
 
 ## 4. Primary → secondary → tertiary
@@ -68,5 +71,8 @@ Detail density follows attention: dense where the camera and story look, sparse 
 | Parts hovering 1 mm apart or randomly intersecting | Planned joins from the reference sheet; sink 1–3 mm |
 | Rotations hinge around the world origin | Builders set origin at the attachment point (`sweep` uses its first point) |
 | Faceted curves | More `segments` on lathe (64–96 for hero round parts) |
+| Handle = cylinder or extruded plank | `loft` with a palm swell, narrower neck, flared butt; squareness 0.5–0.65 |
+| Towel = flat plane with stripes | `drape` it onto what it lies on; `add_weave(uv=True)`; stripes in UV meters |
+| Parts snapped to the origin after `group` | Fixed in `sh.group` (it updates matrices first); if you parent by hand, call `bpy.context.view_layer.update()` before reading `matrix_world` |
 | Every part the same size | Size rhythm: big / medium / small; tapers |
 | Gray "black" parts | Not the model: scene too bright (AgX compresses), or `add_wear` size too large on thin parts |

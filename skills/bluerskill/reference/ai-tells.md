@@ -1,6 +1,6 @@
 # 3D AI tells — catalog and fixes
 
-Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Severity: **H** = always fix, **M** = fix unless intended, **L** = polish.
+Each tell has an ID (used by `audit.py` for the scene and `look.py` for the rendered pixels), why it reads as fake, and the fix. Severity: **H** = always fix, **M** = fix unless intended, **L** = polish.
 
 ## Geometry
 
@@ -33,6 +33,7 @@ Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Sev
 | M7 M | No wear in crevices/edges at WEAR ≥ 3 | `hz.add_wear`: AO-driven grime in cavities, convex edge lightening/roughening. |
 | M8 L | Obvious procedural at default scale | Noise texture at default Scale 5 on object coords is recognizable. Change scale, detail, distortion; layer 2 scales. |
 | M9 L | Emission as fill light | Use real lights; emission only for things that actually glow. |
+| M10 H/M | Perfectly smooth normals | Real surfaces have relief from how they were made. Smooth normals read as plastic toys at any distance closer than a room. `hz.add_bump` (pores / orange_peel / noise / hammered / leather), `hz.add_weave`, `hz.add_scratches`. Liquids and glass may stay smooth. |
 
 ## Lighting
 
@@ -44,6 +45,7 @@ Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Sev
 | L4 M | Default world (0.05 gray) or black void | Low-intensity tinted world or HDRI; even a studio has bounce. |
 | L5 H | Neon purple/teal on void | Banned by default (SKILL.md §3). |
 | L6 L | Lights too small → hard CG shadows | Area lights sized like the real source (window ~1×1.5 m, softbox ~0.6–1.2 m). |
+| L7 H/M | Metal/gloss reflecting a flat-color world | Reflections are most of what metal *is*. With nothing to reflect, steel and chrome render as gray plastic. `hz.hdri_world` (bundled HDRIs) or `light_rig(env="auto")`. |
 
 ## Camera & composition
 
@@ -54,6 +56,8 @@ Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Sev
 | C3 M | No DOF on close-up / extreme DOF on wide | Real f-stop for the real distance; f/2.8–5.6 product, f/8+ architecture. |
 | C4 L | Perfect isometric 3/4 on everything | Pick the angle that explains the object's function. |
 | C5 L | No ground / infinite void | Place the subject in a context surface, even if minimal. |
+| C7 M | Subject tiny in frame (< 3 %) or missing | Move in or use a longer lens. *(look.py)* |
+| C8 L | Subject cropped on 2+ frame edges | Pull back unless the crop is a choice. *(look.py)* |
 
 ## Render & color
 
@@ -62,7 +66,11 @@ Each tell has an ID (used by `audit.py`), why it reads as fake, and the fix. Sev
 | R1 H | View transform Standard | AgX. `hz.color_management` |
 | R2 M | Too few samples, no denoise / noisy | Cycles 128–512 + denoise, or EEVEE with raytracing on. |
 | R3 L | Perfect lens | Tiny vignette, subtle chromatic aberration only in compositor, never heavy. |
-| R4 L | Clipped highlights / crushed blacks | Check exposure; AgX look "Medium High Contrast" or "Base Contrast". |
+| R4 M | Clipped highlights / crushed blacks | Check exposure; AgX look "Medium High Contrast" or "Base Contrast". *(look.py measures it)* |
+| R5 M | Milky / washed-out / no true highlights | The brightest things are mid-gray, or blacks are lifted with a bright median. Stronger key:fill, smaller brighter key, glossier hero, less world fill. *(look.py)* |
+| R6 L | All midtones | No light / mid / dark value structure. Darken the ground or background, light the subject. *(look.py)* |
+| R7 M | Subject merges with surroundings | Same value and hue as what's right behind it. Rim light, contrasting surface, value shift. *(look.py)* |
+| R8 M | No highlights on the subject | Everything matte and evenly lit: bevels + gloss + something to reflect + a key near the mirror angle. *(look.py)* |
 
 ## Story (the tell no script can catch)
 

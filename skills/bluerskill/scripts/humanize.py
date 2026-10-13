@@ -9,9 +9,10 @@ Usage (inside Blender's Python):
     hz.apply_scale(mug); hz.bevel(mug, wear=3)
     mat = hz.physical_material("glazed_ceramic", color="#d9cbb3")
     hz.assign(mug, mat); hz.add_breakup(mat, size=hz.obj_size(mug)); hz.add_wear(mat, 0.3, hz.obj_size(mug))
-    table = hz.make_surface(0.9, 0.6, 0.03, "light_wood")
+    hz.add_bump(mat, feature=0.004, kind="orange_peel")      # relief: nothing real is perfectly smooth
+    table = hz.make_surface(0.9, 0.6, 0.03, "light_wood", planks=0.12)
     hz.ground(mug)
-    hz.light_rig("window", target=mug)
+    hz.light_rig("window", target=mug, key_azimuth=150)   # + bundled HDRI for reflections
     hz.camera_rig(mug, lens=70, frame_offset=(0.12, 0.0))
     hz.color_management(); hz.render_settings()
 
@@ -92,8 +93,10 @@ def obj_center(obj):
 
 
 def _select_only(obj):
+    bpy.context.view_layer.update()   # objects linked/removed via bpy.data leave stale entries otherwise
     for o in bpy.context.view_layer.objects:
-        o.select_set(False)
+        if o is not None:
+            o.select_set(False)
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
 
@@ -166,7 +169,7 @@ def ground(obj, floor_z=None, others=None, sink=0.0):
     if floor_z is None:
         floor_z = 0.0 if others is None else None
         candidates = others if others is not None else [
-            o for o in bpy.context.scene.objects if o.type == "MESH" and o is not obj]
+            o for o in bpy.context.scene.objects if o.type == "MESH" and o != obj]
         best = None
         for o in candidates:
             omn, omx = world_bbox(o)
@@ -210,19 +213,75 @@ def remove_startup():
 
 
 def make_surface(width=1.2, depth=0.8, thickness=0.03, preset="light_wood",
-                 color=None, z_top=0.0, location=(0, 0), name="Surface", wear=3):
-    """A real slab (table top, floor board, plinth) instead of an infinite plane."""
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(location[0], location[1], z_top - thickness / 2))
-    slab = bpy.context.active_object
-    slab.name = name
-    slab.scale = (width, depth, thickness)
-    apply_scale(slab)
+                 color=None, z_top=0.0, location=(0, 0), name="Surface", wear=3, planks=None, seed=1,
+                 glued=False):
+    """A real slab (table top, floor, plinth, bench) instead of an infinite plane.
+
+    planks: board width in meters (e.g. 0.09–0.2). Splits the top into boards running along X with
+    hairline gaps, tiny height differences and per-board grain/tone (a "bz_rand" face attribute the
+    shaders read). One wide slab of perfect grain is a tell for anything bigger than a cutting board.
+    glued: strips glued into one flat panel (butcher block, cutting board): seams show only as tone
+    and grain changes, no gaps or steps.
+    """
+    rng = random.Random(seed)
+    bm = bmesh.new()
+    rand_layer = None
+    if planks:
+        n = max(1, round(depth / planks))
+        widths = [depth / n * rng.uniform(0.85, 1.15) for _ in range(n)]
+        k = depth / sum(widths)
+        widths = [w * k for w in widths]
+        gap = 0.0 if glued else min(0.0018, planks * 0.015)
+        y = -depth / 2
+        rand_layer = []
+        for i, w in enumerate(widths):
+            r = bmesh.ops.create_cube(bm, size=1.0)
+            dz = 0.0 if glued else rng.uniform(-0.0004, 0.0004)
+            for v in r["verts"]:
+                v.co.x *= width
+                v.co.y = v.co.y * (w - gap) + y + w / 2
+                v.co.z = v.co.z * thickness + dz
+            rand_layer.append(rng.random())
+            y += w
+    else:
+        r = bmesh.ops.create_cube(bm, size=1.0)
+        for v in r["verts"]:
+            v.co.x *= width
+            v.co.y *= depth
+            v.co.z *= thickness
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    if rand_layer:
+        attr = me.attributes.new("bz_rand", "FLOAT", "FACE")
+        # faces were created board by board, 6 per cube
+        vals = [v for v in rand_layer for _ in range(6)]
+        attr.data.foreach_set("value", vals)
+    slab = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(slab)
+    slab.location = (location[0], location[1], z_top - thickness / 2)
     bevel(slab, wear=wear)
+    if planks and not glued:
+        slab.modifiers["bz_bevel"].width = min(thickness * 0.03, 0.0009)   # eased, not rounded: seams read dark
     mat = physical_material(preset, color=color, name=f"{name}_mat")
     assign(slab, mat)
-    add_breakup(mat, size=max(width, depth), amount=0.08)
-    if "wood" in preset:
-        add_grain(mat, spacing=max(0.0025, width * 0.004), along="X")  # wider grain on big boards
+    add_breakup(mat, size=max(width, depth) if not planks else planks * 3, amount=0.08)
+    if planks:
+        _per_piece_tone(mat, spread=0.18)
+    wood = "wood" in preset or "walnut" in preset or "maple" in preset
+    if wood:
+        add_grain(mat, spacing=max(0.0025, planks * 0.012 if planks else width * 0.004), along="X")
+    if wear >= 3:   # grime settles into seams, pores and the gaps between boards
+        add_wear(mat, strength=wear / 10 * 0.7, size=planks or min(width, depth) * 0.2)
+    if wood:
+        add_bump(mat, feature=0.0008, kind="pores", along="X")
+    elif preset in ("cotton", "linen", "canvas", "felt"):
+        add_weave(mat, thread={"linen": 0.0005, "canvas": 0.0012, "felt": 0.0004}.get(preset, 0.0008),
+                  fuzz=0.85 if preset == "felt" else 0.3)
+    elif preset in ("concrete", "asphalt", "plaster"):
+        add_bump(mat, feature=0.003, kind="noise")
+    else:
+        add_bump(mat, feature=0.002, kind="noise", strength=0.5)
     return slab
 
 
@@ -254,6 +313,15 @@ PRESETS = {
     "brass":           ((0.91, 0.78, 0.42), 0.30, 1.0, {}),
     "skin":            ((0.60, 0.40, 0.33), 0.42, 0.0, {"Subsurface Weight": 0.2,
                                                        "Subsurface Radius": (1.0, 0.35, 0.2)}),
+    "linen":           ((0.52, 0.48, 0.41), 0.88, 0.0, {"Sheen Weight": 0.5, "Sheen Roughness": 0.35}),
+    "canvas":          ((0.30, 0.28, 0.20), 0.90, 0.0, {"Sheen Weight": 0.12, "Sheen Roughness": 0.5}),
+    "felt":            ((0.20, 0.20, 0.19), 0.95, 0.0, {"Sheen Weight": 1.0, "Sheen Roughness": 0.6}),
+    "oiled_walnut":    ((0.16, 0.09, 0.05), 0.45, 0.0, {"Coat Weight": 0.3, "Coat Roughness": 0.25}),
+    "end_grain_maple": ((0.50, 0.37, 0.22), 0.65, 0.0, {}),
+    "enamel_paint":    ((0.40, 0.40, 0.40), 0.25, 0.0, {"Coat Weight": 0.4, "Coat Roughness": 0.08}),
+    "blued_steel":     ((0.24, 0.26, 0.30), 0.30, 1.0, {}),
+    "stainless":       ((0.66, 0.66, 0.65), 0.22, 1.0, {"Anisotropic": 0.3}),
+    "cast_iron":       ((0.36, 0.36, 0.36), 0.60, 1.0, {}),
 }
 
 
@@ -383,8 +451,49 @@ def add_breakup(mat, size=0.2, amount=0.1, rough_spread=None, seed=1):
     return mat
 
 
+def _piece_random(nt, x=-1900, y=-1200):
+    """0–1 random per object AND per board/piece (face attribute "bz_rand" from make_surface)."""
+    oi = nt.nodes.new("ShaderNodeObjectInfo")
+    oi.location = (x, y)
+    at = nt.nodes.new("ShaderNodeAttribute")
+    at.location = (x, y - 200)
+    at.attribute_type = "GEOMETRY"
+    at.attribute_name = "bz_rand"
+    add = nt.nodes.new("ShaderNodeMath")
+    add.operation = "ADD"
+    add.location = (x + 200, y)
+    nt.links.new(oi.outputs["Random"], add.inputs[0])
+    nt.links.new(at.outputs["Fac"], add.inputs[1])
+    fr = nt.nodes.new("ShaderNodeMath")
+    fr.operation = "FRACT"
+    fr.location = (x + 350, y)
+    nt.links.new(add.outputs[0], fr.inputs[0])
+    return fr.outputs[0]
+
+
+def _per_piece_tone(mat, spread=0.15):
+    """Each board / instance a slightly different tone: no two planks come from the same tree."""
+    nt = mat.node_tree
+    base_in = principled(mat).inputs["Base Color"]
+    r = _piece_random(nt, x=-900, y=1500)
+    ramp = _ramp(nt, (1 - spread, 1 - spread * 1.1, 1 - spread * 1.25), (1.0, 1.0, 1.0), 0.0, 1.0, x=-600, y=1500)
+    nt.links.new(r, ramp.inputs["Fac"])
+    mix = _mix_rgba(nt, "MULTIPLY", x=-100, y=1400)
+    _sock(mix.inputs, "Factor_Float").default_value = 1.0
+    src = _source(nt, base_in)
+    if src is not None:
+        nt.links.new(src, _sock(mix.inputs, "A_Color"))
+    else:
+        _sock(mix.inputs, "A_Color").default_value = base_in.default_value[:]
+    nt.links.new(ramp.outputs["Color"], _sock(mix.inputs, "B_Color"))
+    nt.links.new(_sock(mix.outputs, "Result_Color"), base_in)
+    return mat
+
+
 def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2, late_wood=(0.45, 0.33, 0.25)):
-    """Wood grain: distorted wave bands darkening base color, slightly rougher in late wood."""
+    """Wood grain: distorted wave bands darkening base color, slightly rougher in late wood.
+
+    Each object (and each board of a planked make_surface) gets its own slice of the log."""
     nt = mat.node_tree
     p = principled(mat)
     base_in, rough_in = p.inputs["Base Color"], p.inputs["Roughness"]
@@ -397,6 +506,18 @@ def add_grain(mat, spacing=0.0025, along="X", contrast=0.18, seed=2, late_wood=(
     mp.inputs["Scale"].default_value = (stretch, 1, 1) if along == "X" else (1, stretch, 1)
     mp.inputs["Location"].default_value = (0.0, 0.08 + 0.03 * seed, 0.05) if along == "X" else (0.08 + 0.03 * seed, 0.0, 0.05)
     mp.inputs["Rotation"].default_value = (math.radians(0.7), math.radians(1.3), 0)
+    pr = _piece_random(nt, x=-1900, y=-600)
+    off = nt.nodes.new("ShaderNodeCombineXYZ")   # shift ring center + position along the log per piece
+    off.location = (-1500, -600)
+    for i, k in enumerate((3.7, 0.02, 0.03)):   # small: big shifts turn flat-sawn grain into "water"
+        mm = nt.nodes.new("ShaderNodeMath")
+        mm.operation = "MULTIPLY_ADD"
+        mm.location = (-1700, -500 - i * 120)
+        nt.links.new(pr, mm.inputs[0])
+        mm.inputs[1].default_value = k
+        mm.inputs[2].default_value = mp.inputs["Location"].default_value[i]
+        nt.links.new(mm.outputs[0], off.inputs[i])
+    nt.links.new(off.outputs[0], mp.inputs["Location"])
     # domain warp: wobble the coordinates so rings meander instead of running parallel
     warp = nt.nodes.new("ShaderNodeTexNoise")
     warp.location = (-1500, -1000)
@@ -535,6 +656,227 @@ def add_wear(mat, strength=0.3, size=0.2, grime=(0.05, 0.04, 0.03), edge_tint=No
 
 
 # --------------------------------------------------------------------------- #
+# Surface relief (M10): real surfaces are never mathematically smooth
+# --------------------------------------------------------------------------- #
+
+
+def _coord(nt, stretch=None, rotation=None, x=-1500, y=-1400, uv=False):
+    """Object (or UV) coordinates, optionally stretched (anisotropic features: grain, brushing, scratches)."""
+    tc = next((n for n in nt.nodes if n.bl_idname == "ShaderNodeTexCoord"), None) or nt.nodes.new("ShaderNodeTexCoord")
+    src = tc.outputs["UV" if uv else "Object"]
+    if stretch is None and rotation is None:
+        return src
+    mp = nt.nodes.new("ShaderNodeMapping")
+    mp.location = (x, y)
+    if stretch is not None:
+        mp.inputs["Scale"].default_value = stretch
+    if rotation is not None:
+        mp.inputs["Rotation"].default_value = [math.radians(a) for a in rotation]
+    nt.links.new(src, mp.inputs["Vector"])
+    return mp.outputs["Vector"]
+
+
+def _push_normal(mat, height, depth, strength=1.0, invert=False, x=-250, y=-900):
+    """Chain a Bump node into Principled Normal (and Coat Normal), keeping any existing bump."""
+    nt = mat.node_tree
+    p = principled(mat)
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.location = (x, y)
+    bump.invert = invert
+    bump.inputs["Strength"].default_value = strength
+    bump.inputs["Distance"].default_value = depth
+    nt.links.new(height, bump.inputs["Height"])
+    prev = _source(nt, p.inputs["Normal"])
+    if prev is not None:
+        nt.links.new(prev, bump.inputs["Normal"])
+    # Coat Normal is left unlinked on purpose: a clear coat stays smooth over the relief beneath it,
+    # which is exactly what makes lacquer, varnish and glaze read as a separate layer.
+    nt.links.new(bump.outputs["Normal"], p.inputs["Normal"])
+    return bump
+
+
+def add_bump(mat, feature=0.002, depth=None, kind="noise", strength=1.0, along="X", seed=3):
+    """Micro-relief from the real surface process (M10). feature = typical bump size in meters.
+
+    kind:
+      "noise"       generic fine relief (cast, molded, matte paint)            feature 0.5–3 mm
+      "orange_peel" sprayed paint / powder coat / glaze ripple                feature 2–6 mm, tiny depth
+      "pores"       open-grain wood pores, stretched along the grain (`along`)  feature 0.3–1 mm
+      "hammered"    peened / forged / hand-beaten metal                        feature 4–12 mm
+      "leather"     pebbled leather / skin                                    feature 1–3 mm
+    depth: relief height in meters (None = sensible fraction of feature).
+    """
+    nt = mat.node_tree
+    if kind == "pores":
+        st = (0.06, 1, 1) if along == "X" else (1, 0.06, 1) if along == "Y" else (1, 1, 0.06)
+        nz = _noise(nt, 1.0 / feature, seed, detail=2, x=-1100, y=-1400)
+        nt.links.new(_coord(nt, stretch=st), nz.inputs["Vector"])
+        r = _ramp(nt, (1, 1, 1), (0, 0, 0), 0.55, 0.75, x=-850, y=-1400)  # sparse dark pits
+        nt.links.new(nz.outputs["Fac"], r.inputs["Fac"])
+        height, d = r.outputs["Color"], depth or feature * 0.25
+    elif kind in ("hammered", "leather"):
+        vo = nt.nodes.new("ShaderNodeTexVoronoi")
+        vo.location = (-1100, -1400)
+        vo.feature = "SMOOTH_F1" if kind == "hammered" else "F1"
+        vo.inputs["Scale"].default_value = 1.0 / feature
+        vo.inputs["Randomness"].default_value = 0.85
+        if "Smoothness" in vo.inputs:
+            vo.inputs["Smoothness"].default_value = 0.6
+        nt.links.new(_coord(nt), vo.inputs["Vector"])
+        if kind == "leather":   # cell edges are the creases
+            ma = nt.nodes.new("ShaderNodeMath")
+            ma.operation = "POWER"
+            ma.location = (-900, -1400)
+            nt.links.new(vo.outputs["Distance"], ma.inputs[0])
+            ma.inputs[1].default_value = 0.5
+            height = ma.outputs[0]
+        else:
+            height = vo.outputs["Distance"]
+        d = depth or feature * (0.06 if kind == "hammered" else 0.12)
+    else:
+        detail = 3 if kind == "orange_peel" else 8
+        nz = _noise(nt, 1.0 / feature, seed, detail=detail, x=-1100, y=-1400)
+        height = nz.outputs["Fac"]
+        d = depth or feature * (0.015 if kind == "orange_peel" else 0.08)
+    _push_normal(mat, height, d, strength)
+    return mat
+
+
+def add_scratches(mat, size=0.2, density=0.5, strength=0.5, seed=9, metal_reveal=True):
+    """Fine directional scratches + handling marks (glossy plastics, metals, glass, lacquer).
+
+    Three layers of stretched noise at different angles, thresholded into hairlines, clustered by a
+    large mask so they gather where hands and tools touch instead of covering everything evenly.
+    Scratches are rougher (they scatter light) and, on coated metal, reveal brighter bare metal.
+    """
+    nt = mat.node_tree
+    p = principled(mat)
+    rough_in, base_in = p.inputs["Roughness"], p.inputs["Base Color"]
+    rng = random.Random(seed)
+    line_len = size * 0.15
+    acc = None
+    for i in range(3):
+        rot = (0, 0, rng.uniform(0, 180))
+        nz = _noise(nt, 1.0 / max(line_len, 1e-4), seed + i * 5, detail=2, x=-1300, y=-1900 - i * 250)
+        nt.links.new(_coord(nt, stretch=(0.02, 1, 1), rotation=rot, x=-1500, y=-1900 - i * 250), nz.inputs["Vector"])
+        th = 0.5 + 0.015 * (1 - density)
+        r = _ramp(nt, (0, 0, 0), (1, 1, 1), th - 0.008, th, x=-1050, y=-1900 - i * 250)
+        r2 = _ramp(nt, (1, 1, 1), (0, 0, 0), th, th + 0.008, x=-850, y=-1900 - i * 250)
+        nt.links.new(nz.outputs["Fac"], r.inputs["Fac"])
+        nt.links.new(nz.outputs["Fac"], r2.inputs["Fac"])
+        band = nt.nodes.new("ShaderNodeMath")
+        band.operation = "MULTIPLY"
+        band.location = (-650, -1900 - i * 250)
+        nt.links.new(r.outputs["Color"], band.inputs[0])
+        nt.links.new(r2.outputs["Color"], band.inputs[1])
+        if acc is None:
+            acc = band
+        else:
+            mx = nt.nodes.new("ShaderNodeMath")
+            mx.operation = "MAXIMUM"
+            mx.location = (-500, -1900 - i * 250)
+            nt.links.new(acc.outputs[0], mx.inputs[0])
+            nt.links.new(band.outputs[0], mx.inputs[1])
+            acc = mx
+    cluster = _noise(nt, 1.0 / max(size * 0.4, 1e-4), seed + 31, detail=2, x=-1100, y=-2700)
+    cm = _ramp(nt, (0, 0, 0), (1, 1, 1), 0.45, 0.62, x=-850, y=-2700)
+    nt.links.new(cluster.outputs["Fac"], cm.inputs["Fac"])
+    mask = nt.nodes.new("ShaderNodeMath")
+    mask.operation = "MULTIPLY"
+    mask.location = (-350, -2200)
+    nt.links.new(acc.outputs[0], mask.inputs[0])
+    nt.links.new(cm.outputs["Color"], mask.inputs[1])
+    amt = nt.nodes.new("ShaderNodeMath")
+    amt.operation = "MULTIPLY"
+    amt.location = (-200, -2200)
+    amt.inputs[1].default_value = strength
+    nt.links.new(mask.outputs[0], amt.inputs[0])
+
+    rsrc = _source(nt, rough_in)
+    ma = nt.nodes.new("ShaderNodeMath")
+    ma.operation = "MULTIPLY_ADD"
+    ma.use_clamp = True
+    ma.location = (-50, -2000)
+    nt.links.new(amt.outputs[0], ma.inputs[0])
+    ma.inputs[1].default_value = 0.35
+    if rsrc is not None:
+        nt.links.new(rsrc, ma.inputs[2])
+    else:
+        ma.inputs[2].default_value = rough_in.default_value
+    nt.links.new(ma.outputs[0], rough_in)
+    if metal_reveal and p.inputs["Metallic"].default_value > 0.5:
+        src = _source(nt, base_in)
+        mix = _mix_rgba(nt, "SCREEN", x=0, y=-1700)
+        nt.links.new(amt.outputs[0], _sock(mix.inputs, "Factor_Float"))
+        if src is not None:
+            nt.links.new(src, _sock(mix.inputs, "A_Color"))
+        else:
+            _sock(mix.inputs, "A_Color").default_value = base_in.default_value[:]
+        _sock(mix.inputs, "B_Color").default_value = (0.35, 0.35, 0.35, 1)
+        nt.links.new(_sock(mix.outputs, "Result_Color"), base_in)
+    _push_normal(mat, amt.outputs[0], size * 0.0004, 1.0, invert=True, x=-50, y=-2300)
+    return mat
+
+
+def add_weave(mat, thread=0.0008, depth=None, fuzz=0.3, along="X", color_var=0.06, seed=13, uv=False):
+    """Woven fabric (linen, canvas, cotton towel, upholstery): over-under threads + slub + fuzz.
+
+    thread = thread pitch in meters (fine linen 0.3–0.5 mm, canvas 0.8–1.5 mm, towel 1.5–3 mm).
+    uv=True reads the UV map as meters (what shapes.drape makes), so threads follow folds.
+    Without weave relief, cloth reads as painted rubber at any distance closer than a room.
+    """
+    nt = mat.node_tree
+    p = principled(mat)
+    base_in = p.inputs["Base Color"]
+    co = _coord(nt, rotation=(0, 0, 0 if along == "X" else 90), x=-1700, y=-3200, uv=uv)
+    waves = []
+    for i, axis in enumerate(("X", "Y")):
+        wv = nt.nodes.new("ShaderNodeTexWave")
+        wv.location = (-1300, -3100 - i * 250)
+        wv.wave_type = "BANDS"
+        wv.bands_direction = axis
+        wv.wave_profile = "SIN"
+        wv.inputs["Scale"].default_value = 1.0 / thread / 2.0
+        wv.inputs["Distortion"].default_value = 0.6 + 0.4 * i   # slubs: threads aren't perfectly even
+        wv.inputs["Detail"].default_value = 1.5
+        wv.inputs["Detail Scale"].default_value = 8.0
+        nt.links.new(co, wv.inputs["Vector"])
+        waves.append(wv)
+    ck = nt.nodes.new("ShaderNodeTexChecker")
+    ck.location = (-1300, -3650)
+    ck.inputs["Scale"].default_value = 1.0 / thread
+    nt.links.new(co, ck.inputs["Vector"])
+    sel = nt.nodes.new("ShaderNodeMix")
+    sel.data_type = "FLOAT"
+    sel.location = (-1000, -3300)
+    nt.links.new(ck.outputs["Fac"], _sock(sel.inputs, "Factor_Float"))
+    nt.links.new(waves[0].outputs["Fac"], _sock(sel.inputs, "A_Float"))
+    nt.links.new(waves[1].outputs["Fac"], _sock(sel.inputs, "B_Float"))
+    fz = _noise(nt, 1.0 / (thread * 0.6), seed, detail=4, x=-1000, y=-3600)
+    hm = nt.nodes.new("ShaderNodeMix")
+    hm.data_type = "FLOAT"
+    hm.location = (-750, -3400)
+    _sock(hm.inputs, "Factor_Float").default_value = fuzz
+    nt.links.new(_sock(sel.outputs, "Result_Float"), _sock(hm.inputs, "A_Float"))
+    nt.links.new(fz.outputs["Fac"], _sock(hm.inputs, "B_Float"))
+    height = _sock(hm.outputs, "Result_Float")
+    _push_normal(mat, height, depth or thread * 0.35, 1.0, x=-450, y=-3400)
+    if color_var > 0:   # thread-level value variation: dye never takes perfectly evenly
+        src = _source(nt, base_in)
+        r = _ramp(nt, (1 - color_var, 1 - color_var, 1 - color_var), (1, 1, 1), 0.2, 0.8, x=-450, y=-3100)
+        nt.links.new(height, r.inputs["Fac"])
+        mix = _mix_rgba(nt, "MULTIPLY", x=-200, y=-3100)
+        _sock(mix.inputs, "Factor_Float").default_value = 1.0
+        if src is not None:
+            nt.links.new(src, _sock(mix.inputs, "A_Color"))
+        else:
+            _sock(mix.inputs, "A_Color").default_value = base_in.default_value[:]
+        nt.links.new(r.outputs["Color"], _sock(mix.inputs, "B_Color"))
+        nt.links.new(_sock(mix.outputs, "Result_Color"), base_in)
+    return mat
+
+
+# --------------------------------------------------------------------------- #
 # World, light, camera, render
 # --------------------------------------------------------------------------- #
 
@@ -544,9 +886,92 @@ def world(color=(0.6, 0.7, 0.85), strength=0.3, temperature=None):
     bpy.context.scene.world = w
     if not w.node_tree:
         w.use_nodes = True
-    bg = next(n for n in w.node_tree.nodes if n.bl_idname == "ShaderNodeBackground")
+    nt = w.node_tree
+    out = next((n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputWorld"), None) or nt.nodes.new("ShaderNodeOutputWorld")
+    if any(n.bl_idname != "ShaderNodeBackground" for n in nt.nodes if n != out):  # reset an hdri_world tree
+        for n in [n for n in nt.nodes if n != out]:
+            nt.nodes.remove(n)
+    bg = next((n for n in nt.nodes if n.bl_idname == "ShaderNodeBackground"), None)
+    if bg is None:
+        bg = nt.nodes.new("ShaderNodeBackground")
+        nt.links.new(bg.outputs[0], out.inputs["Surface"])
     bg.inputs["Color"].default_value = kelvin(temperature) if temperature else (*color[:3], 1)
     bg.inputs["Strength"].default_value = strength
+    return w
+
+
+HDRIS = ("interior", "studio", "courtyard", "city", "forest", "sunrise", "sunset", "night")
+
+
+def hdri_path(name):
+    """Path to one of the HDRIs that ship with Blender (no download needed), or a file path."""
+    import os
+    if os.path.isfile(name):
+        return name
+    d = bpy.utils.system_resource("DATAFILES", path="studiolights/world")
+    p = os.path.join(d or "", name if name.endswith(".exr") else name + ".exr")
+    if not os.path.isfile(p):
+        raise FileNotFoundError(f"HDRI '{name}' not found; bundled: {', '.join(HDRIS)}")
+    return p
+
+
+def hdri_world(name="interior", strength=0.3, reflect=None, rotation_deg=0.0, tint=None,
+               camera_color=None, camera_strength=1.0):
+    """Environment that metals and gloss can reflect (L7), split by ray type.
+
+    strength:  how much the environment lights diffuse surfaces (keep low; your lights do the work).
+    reflect:   strength seen in reflections (None = 3x strength). Metal with nothing to reflect reads
+               as black plastic; this is the cheapest fix for "dead" chrome, steel, glass and glaze.
+    tint:      Kelvin or RGB multiplier, to push the environment cool against a warm key.
+    camera_color: what the camera sees as background (None = the HDRI itself, blurred by DOF).
+    """
+    w = bpy.context.scene.world or bpy.data.worlds.new("World")
+    bpy.context.scene.world = w
+    if not w.node_tree:
+        w.use_nodes = True
+    nt = w.node_tree
+    for n in list(nt.nodes):
+        if n.bl_idname != "ShaderNodeOutputWorld":
+            nt.nodes.remove(n)
+    out = next(n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputWorld")
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    mp = nt.nodes.new("ShaderNodeMapping")
+    mp.inputs["Rotation"].default_value[2] = math.radians(rotation_deg)
+    env = nt.nodes.new("ShaderNodeTexEnvironment")
+    env.image = bpy.data.images.load(hdri_path(name), check_existing=True)
+    nt.links.new(tc.outputs["Generated"], mp.inputs["Vector"])
+    nt.links.new(mp.outputs["Vector"], env.inputs["Vector"])
+    col = env.outputs["Color"]
+    if tint is not None:
+        tm = nt.nodes.new("ShaderNodeMix")
+        tm.data_type, tm.blend_type = "RGBA", "MULTIPLY"
+        _sock(tm.inputs, "Factor_Float").default_value = 1.0
+        nt.links.new(col, _sock(tm.inputs, "A_Color"))
+        _sock(tm.inputs, "B_Color").default_value = kelvin(tint) if isinstance(tint, (int, float)) else (*tint[:3], 1)
+        col = _sock(tm.outputs, "Result_Color")
+    lp = nt.nodes.new("ShaderNodeLightPath")
+    diffuse = nt.nodes.new("ShaderNodeBackground")
+    diffuse.inputs["Strength"].default_value = strength
+    gloss = nt.nodes.new("ShaderNodeBackground")
+    gloss.inputs["Strength"].default_value = reflect if reflect is not None else strength * 3
+    for b in (diffuse, gloss):
+        nt.links.new(col, b.inputs["Color"])
+    m1 = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(lp.outputs["Is Glossy Ray"], m1.inputs[0])
+    nt.links.new(diffuse.outputs[0], m1.inputs[1])
+    nt.links.new(gloss.outputs[0], m1.inputs[2])
+    final = m1
+    cam_bg = nt.nodes.new("ShaderNodeBackground")
+    if camera_color is not None:
+        cam_bg.inputs["Color"].default_value = (*camera_color[:3], 1)
+    else:
+        nt.links.new(col, cam_bg.inputs["Color"])
+    cam_bg.inputs["Strength"].default_value = camera_strength if camera_color is not None else strength * camera_strength
+    m2 = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(lp.outputs["Is Camera Ray"], m2.inputs[0])
+    nt.links.new(final.outputs[0], m2.inputs[1])
+    nt.links.new(cam_bg.outputs[0], m2.inputs[2])
+    nt.links.new(m2.outputs[0], out.inputs["Surface"])
     return w
 
 
@@ -579,8 +1004,20 @@ def _sph(center, dist, azim_deg, elev_deg):
     return center + Vector((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e))) * dist
 
 
-def light_rig(kind="window", target=None, clear=True, intensity=1.0):
-    """Motivated lighting rigs. See reference/light-camera.md."""
+RIG_ENV = {"window": ("interior", 9000), "overcast": ("courtyard", 8000), "golden_hour": ("sunset", None),
+           "studio": ("studio", None), "night_practical": ("night", 12000)}
+
+
+def light_rig(kind="window", target=None, clear=True, intensity=1.0, env="auto", env_rotation=0.0,
+              key_azimuth=None):
+    """Motivated lighting rigs. See reference/light-camera.md.
+
+    env: "auto" gives each rig a matching bundled HDRI for reflections (low diffuse, stronger in
+    gloss), so metal and glaze have something to reflect. A name/path picks another; None keeps
+    the old flat-color world.
+    key_azimuth: degrees; where the key comes from. Put it 60–130° away from the camera azimuth
+    (side / three-quarter back light): shadows then describe form and gloss catches a highlight.
+    """
     sc = bpy.context.scene
     if clear:
         for o in [o for o in sc.objects if o.type == "LIGHT"]:
@@ -590,9 +1027,13 @@ def light_rig(kind="window", target=None, clear=True, intensity=1.0):
     made = []
     if kind == "window":
         d = s * 3.0
-        made.append(_area("Window", s * 1.6, 26 * d * d * intensity, 5600, _sph(c, d, 160, 28), c, size_y=s * 2.4))
-        made.append(_area("Bounce", s * 2.0, 4 * d * d * intensity, 4200, _sph(c, d, -20, 10), c))
-        world(strength=0.25 * intensity, temperature=9000)
+        # a window is big, but from 3 object-sizes away it is not a sky dome: keep it ~1x1.4 s so
+        # shadows have direction and the far side of the subject falls off (key:fill ≈ 5:1)
+        ka = 160 if key_azimuth is None else key_azimuth
+        d = s * 1.8
+        made.append(_area("Window", s * 0.7, 30 * d * d * intensity, 5600, _sph(c, d, ka, 38), c, size_y=s * 1.0))
+        made.append(_area("Bounce", s * 2.0, 1.0 * d * d * intensity, 4200, _sph(c, d, ka - 180, 10), c))
+        world(strength=0.08 * intensity, temperature=9000)
     elif kind == "overcast":
         d = s * 3.5
         made.append(_area("Sky", s * 5, 30 * d * d * intensity, 7000, c + Vector((0, 0, d)), c))
@@ -632,6 +1073,13 @@ def light_rig(kind="window", target=None, clear=True, intensity=1.0):
         world(strength=0.03 * intensity, temperature=12000)
     else:
         raise ValueError(kind)
+    if env:
+        bg = next(n for n in sc.world.node_tree.nodes if n.bl_idname == "ShaderNodeBackground")
+        flat = bg.inputs["Strength"].default_value
+        name, tint = RIG_ENV[kind] if env == "auto" else (env, None)
+        # same diffuse fill as the flat world, but reflections now see a real room / sky
+        hdri_world(name, strength=flat, reflect=max(flat * 4, 1.2 * intensity), tint=tint,
+                   rotation_deg=env_rotation)
     return made
 
 
